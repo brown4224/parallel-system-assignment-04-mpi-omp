@@ -161,7 +161,7 @@ void init_array(int *a, int arr_size) {
 
 // Input: takes a void pointer an pointer to open file
 // Output:  Calculates filelength and min message
-void io_init(void *ptr, ifstream *fileInput, int* target_array = NULL) {
+void io_init(void *ptr, ifstream *fileInput) {
     data *tdata = (data *) ptr;
     fileInput->seekg(0, ios::end);
     tdata->fileLength = fileInput->tellg();
@@ -177,34 +177,12 @@ void io_init(void *ptr, ifstream *fileInput, int* target_array = NULL) {
     }
 }
 
-// Input: takes a void pointer an pointer to open file
-// Output: Reads file to buffer
-void readFile(void *ptr, ifstream *fileInput, int* target_array) {
-    data *tdata = (data *) ptr;
-    fileInput->seekg(tdata->seek);
-//    cout << "Reading File" << endl;
-
-    //  Check if buffer is less then remainder of file
-    if (tdata->fileLength - tdata->seek < tdata->size) {
-        tdata->size = tdata->fileLength - tdata->seek;
-        *tdata->messageSize = (tdata->size / tdata->unit) / tdata->comm_sz;
-        tdata->remainder = (tdata->size / tdata->unit) - (*tdata->messageSize * tdata->comm_sz);
-    }
-    fileInput->read((char *) target_array, tdata->size);
-    tdata->seek = fileInput->tellg();
-
-//    cout << "done reading file" << endl;
-//    for (int i= 0; i< tdata->size / tdata->unit; i++)
-//        cout << *target_array << endl;
-
-}
-
-
 //// Input: takes a void pointer an pointer to open file
 //// Output: Reads file to buffer
-//void readFile(void *ptr, ifstream *fileInput) {
+//void readFile(void *ptr, ifstream *fileInput, int* target_array) {
 //    data *tdata = (data *) ptr;
 //    fileInput->seekg(tdata->seek);
+////    cout << "Reading File" << endl;
 //
 //    //  Check if buffer is less then remainder of file
 //    if (tdata->fileLength - tdata->seek < tdata->size) {
@@ -212,10 +190,32 @@ void readFile(void *ptr, ifstream *fileInput, int* target_array) {
 //        *tdata->messageSize = (tdata->size / tdata->unit) / tdata->comm_sz;
 //        tdata->remainder = (tdata->size / tdata->unit) - (*tdata->messageSize * tdata->comm_sz);
 //    }
-//    fileInput->read((char *) tdata->readBuffer, tdata->size);
+//    fileInput->read((char *) target_array, tdata->size);
 //    tdata->seek = fileInput->tellg();
 //
+////    cout << "done reading file" << endl;
+////    for (int i= 0; i< tdata->size / tdata->unit; i++)
+////        cout << *target_array << endl;
+//
 //}
+
+
+// Input: takes a void pointer an pointer to open file
+// Output: Reads file to buffer
+void readFile(void *ptr, ifstream *fileInput) {
+    data *tdata = (data *) ptr;
+    fileInput->seekg(tdata->seek);
+
+    //  Check if buffer is less then remainder of file
+    if (tdata->fileLength - tdata->seek < tdata->size) {
+        tdata->size = tdata->fileLength - tdata->seek;
+        *tdata->messageSize = (tdata->size / tdata->unit) / tdata->comm_sz;
+        tdata->remainder = (tdata->size / tdata->unit) - (*tdata->messageSize * tdata->comm_sz);
+    }
+    fileInput->read((char *) tdata->readBuffer, tdata->size);
+    tdata->seek = fileInput->tellg();
+
+}
 
 void writeFile(void *ptr) {
     data *tdata = (data *) ptr;
@@ -256,45 +256,18 @@ void writeFile(void *ptr) {
 }
 
 
-//// Input:  Takes a void pointer
-//// Output: Reads call back to read file or init file
-//void openFile(void(&f)(void *ptr, ifstream *fileInput), void *ptr) {
-//    data *tdata = (data *) ptr;
-//    if (tdata->my_rank == tdata->root) {
-//
-//        ifstream fileInput;
-//        fileInput.open(tdata->filePath, ios::binary);
-//        if (fileInput.is_open()) {
-//
-//            // Function CAll Back
-//            f(tdata, &fileInput);
-//            fileInput.close();
-//        } else {
-//            cout << "Can Not open file..." << endl;
-//            tdata->keep_alive = false;
-//        }
-//    }
-//
-//    // All processes call and check for error
-//    MPI_Allreduce(&tdata->keep_alive, &tdata->alive, 1,MPI_C_BOOL, MPI_LAND, MPI_COMM_WORLD );
-//    if(!(tdata->alive)){
-//        printf("Abort process called.  Thread %d shutting down!\n", tdata->my_rank);
-//        MPI_Finalize();
-//        exit(1);
-//    }
-
 // Input:  Takes a void pointer
 // Output: Reads call back to read file or init file
-void openFile(void(&f)(void *ptr, ifstream *fileInput, int* target_array),  string file_path, int target_node, void *ptr,  int* target_array = NULL) {
+void openFile(void(&f)(void *ptr, ifstream *fileInput), void *ptr) {
     data *tdata = (data *) ptr;
-    if (tdata->my_rank == target_node) {
+    if (tdata->my_rank == tdata->root) {
 
         ifstream fileInput;
-        fileInput.open(file_path, ios::binary);
+        fileInput.open(tdata->filePath, ios::binary);
         if (fileInput.is_open()) {
 
             // Function CAll Back
-            f(tdata, &fileInput, target_array);
+            f(tdata, &fileInput);
             fileInput.close();
         } else {
             cout << "Can Not open file..." << endl;
@@ -309,6 +282,33 @@ void openFile(void(&f)(void *ptr, ifstream *fileInput, int* target_array),  stri
         MPI_Finalize();
         exit(1);
     }
+
+//// Input:  Takes a void pointer
+//// Output: Reads call back to read file or init file
+//void openFile(void(&f)(void *ptr, ifstream *fileInput, int* target_array),  string file_path, int target_node, void *ptr,  int* target_array = NULL) {
+//    data *tdata = (data *) ptr;
+//    if (tdata->my_rank == target_node) {
+//
+//        ifstream fileInput;
+//        fileInput.open(file_path, ios::binary);
+//        if (fileInput.is_open()) {
+//
+//            // Function CAll Back
+//            f(tdata, &fileInput, target_array);
+//            fileInput.close();
+//        } else {
+//            cout << "Can Not open file..." << endl;
+//            tdata->keep_alive = false;
+//        }
+//    }
+//
+//    // All processes call and check for error
+//    MPI_Allreduce(&tdata->keep_alive, &tdata->alive, 1,MPI_C_BOOL, MPI_LAND, MPI_COMM_WORLD );
+//    if(!(tdata->alive)){
+//        printf("Abort process called.  Thread %d shutting down!\n", tdata->my_rank);
+//        MPI_Finalize();
+//        exit(1);
+//    }
 
 }
 
@@ -462,7 +462,8 @@ int main(int argc, char *argv[]) {
 
 
         //////// OPEN FILE & INIT MSG   //////////////
-    openFile( io_init, tdata.filePath, tdata.root, &tdata);
+    openFile(io_init, &tdata);
+//    openFile( io_init, tdata.filePath, tdata.root, &tdata);
     build_mpi_data_type(&tdata.num_iterations, &tdata.minMessage, tdata.root);
 
 
@@ -475,12 +476,32 @@ int main(int argc, char *argv[]) {
         if (i == last)
             tdata.messageSize = &tdata.minMessage;
 
-        openFile( readFile, tdata.filePath, tdata.root, &tdata, tdata.readBuffer);
+        cout << "Opening file" << endl;
+//        void openFile(void(&f)(void *ptr, ifstream *fileInput), void *ptr)
+                openFile(readFile, &tdata);
 
+//        openFile( readFile, tdata.filePath, tdata.root, &tdata, tdata.readBuffer);
+
+        cout << "Scatter"  <<  endl;
         MPI_Scatter(tdata.readBuffer, *tdata.messageSize, MPI_INT, tdata.local_buffer, *tdata.messageSize, MPI_INT, tdata.root, MPI_COMM_WORLD);
         cout << " Remainder" << endl;
         append_remainder_data(&tdata, tdata.root);
 
+//        if(tdata.my_rank == tdata.root){
+//            for(int j = 0; j < *tdata.messageSize; j++)
+//                cout << tdata.readBuffer[j] << endl;
+////                cout << tdata.local_buffer[j] << endl;
+//
+////                cout < to_string( (int)tdata.readBuffer[0]) << endl;
+//        }
+
+        // Root gets any data not evenly split
+//        if (tdata.remainder > 0 && tdata.my_rank == tdata.root) {
+//            cout << "adding remainder " << tdata.my_rank << " Loop: " << i << endl;
+//            std::copy(tdata.readBuffer + ((tdata.size / tdata.unit) - tdata.remainder),
+//                      tdata.readBuffer + (tdata.size / tdata.unit), tdata.local_buffer + *tdata.messageSize);
+//            tdata.messageSize += tdata.remainder;
+//        }
         find_min_max(&tdata);
 
 //        writeFile(&tdata);
@@ -488,14 +509,14 @@ int main(int argc, char *argv[]) {
     }
 
 
-    MPI_Allreduce(&tdata.local_min, &tdata.min, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
-    MPI_Allreduce(&tdata.local_max, &tdata.max, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+//    MPI_Allreduce(&tdata.local_min, &tdata.min, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+//    MPI_Allreduce(&tdata.local_max, &tdata.max, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
 
-    //////// Rest Values and Send Min and Max //////////////
-    tdata.messageSize = &tdata.maxMessage;
-    tdata.seek = 0;
-    tdata.remainder = 0;
-    tdata.size = tdata.bufferSize;
+//    //////// Rest Values and Send Min and Max //////////////
+//    tdata.messageSize = &tdata.maxMessage;
+//    tdata.seek = 0;
+//    tdata.remainder = 0;
+//    tdata.size = tdata.bufferSize;
 
 
 //    //////// FIND Buckets //////////////
