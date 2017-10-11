@@ -1,0 +1,28 @@
+#IncludeRegexLine: ^[ 	]*[#%][ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+/home/sean/Desktop/school/parralel-systems/parallel-system-assignment-04-mpi-omp/main.cpp
+cstdlib
+-
+iostream
+-
+fstream
+-
+chrono
+-
+vector
+-
+cmath
+-
+assert.h
+-
+mpi.h
+-
+omp.h
+-
+

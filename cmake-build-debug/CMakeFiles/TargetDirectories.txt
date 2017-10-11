@@ -1,0 +1,3 @@
+/home/sean/Desktop/school/parralel-systems/parallel-system-assignment-04-mpi-omp/cmake-build-debug/CMakeFiles/rebuild_cache.dir
+/home/sean/Desktop/school/parralel-systems/parallel-system-assignment-04-mpi-omp/cmake-build-debug/CMakeFiles/edit_cache.dir
+/home/sean/Desktop/school/parralel-systems/parallel-system-assignment-04-mpi-omp/cmake-build-debug/CMakeFiles/parallel_system_assignment_04_mpi_omp.dir

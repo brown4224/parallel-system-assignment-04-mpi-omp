@@ -1,0 +1,1 @@
+mpic++   -fopenmp -g   CMakeFiles/parallel_system_assignment_04_mpi_omp.dir/main.cpp.o  -o parallel_system_assignment_04_mpi_omp 
