@@ -1,7 +1,7 @@
 /**
  * Sean McGlincy
  * Parallel Systems
- * Assignment 2
+ * Assignment 4
  *
  * Dependencies: I am using CLION as an IDE which uses CMAKE 3.8, and GCC, C+11
  * gcc (GCC) 4.8.5 20150623 (Red Hat 4.8.5-11)
@@ -65,7 +65,6 @@ typedef struct {
     //////// MPI  Variables //////////////
     const int root = 0;
     string* local_file;
-    int* local_filesize;
     int maxMessage = 100;
     int *messageSize = NULL;
     int minMessage;
@@ -119,10 +118,7 @@ void delete_file(void* ptr, string filepath){
     if(std::remove(filepath.c_str())  != 0){
         printf("Thread %d: Can Not delete file...\n", tdata->my_rank);
         tdata->keep_alive = false;
-
     }
-
-
 }
 void shutdown_threads(void *ptr){
     data *tdata = (data *) ptr;
@@ -133,7 +129,6 @@ void shutdown_threads(void *ptr){
     delete[] tdata->readBuffer;
     delete[] tdata->data;
     delete[] tdata->local_file;
-//    delete[] tdata->local_filesize;
     MPI_Finalize();
 }
 void io_error_handling(void *ptr){
@@ -189,46 +184,88 @@ void init_array(int *a, int arr_size) {
         a[i] = 0;
 }
 
+string* create_file_structure(int num_files, int rank){
+    string* ptr = new string[num_files];
+    for(int i=0; i< num_files; i++){
+        ptr[i] = "/tmp/mcglincy_mpi_" + to_string(rank) + "_" + to_string(i) + ".binary";
+    }
+    return ptr;
+}
+
 
 // Input: takes a void pointer an pointer to open file
 // Output:  Calculates filelength and min message
-void get_file_size_and_init(void *ptr, ifstream *fileInput) {
+void io_init(void *ptr) {
     data *tdata = (data *) ptr;
-    fileInput->seekg(0, ios::end);
-    tdata->fileLength = fileInput->tellg();
-    tdata->num_iterations = (int) ceil((double) tdata->fileLength / tdata->bufferSize);
 
-    if (tdata->fileLength < tdata->bufferSize) {
-        tdata->minMessage = (tdata->fileLength / tdata->unit) / tdata->comm_sz;
-    } else {
-        tdata->minMessage = ((tdata->fileLength - (tdata->num_iterations - 1) * tdata->bufferSize)) /
-                            (tdata->unit * tdata->comm_sz);
-        if (tdata->minMessage <= 0)
-            tdata->minMessage = tdata->maxMessage;
+
+    if (tdata->my_rank == tdata->root) {
+
+        ifstream fileInput;
+        fileInput.open(tdata->filePath, ios::binary);
+        if (fileInput.is_open()) {
+
+            // Function CAll Back
+            fileInput.seekg(0, ios::end);
+            tdata->fileLength = fileInput.tellg();
+            tdata->num_iterations = (int) ceil((double) tdata->fileLength / tdata->bufferSize);
+
+            if (tdata->fileLength < tdata->bufferSize) {
+                tdata->minMessage = (tdata->fileLength / tdata->unit) / tdata->comm_sz;
+            } else {
+                tdata->minMessage = ((tdata->fileLength - (tdata->num_iterations - 1) * tdata->bufferSize)) /
+                                    (tdata->unit * tdata->comm_sz);
+                if (tdata->minMessage <= 0)
+                    tdata->minMessage = tdata->maxMessage;
+            }
+            fileInput.close();
+        } else {
+            cout << "Can Not open file..." << endl;
+            tdata->keep_alive = false;
+        }
     }
+
+    // All processes call and check for error
+    MPI_Allreduce(&tdata->keep_alive, &tdata->alive, 1,MPI_C_BOOL, MPI_LAND, MPI_COMM_WORLD );
+    io_error_handling(tdata);
 }
 
 // Input: takes a void pointer an pointer to open file
 // Output: Reads file to buffer
-void readFile(void *ptr, ifstream *fileInput) {
-    data *tdata = (data *) ptr;
-    fileInput->seekg(tdata->seek);
+void read_master_file(void *ptr, string filePath) {
 
-    //  Check if buffer is less then remainder of file
-    if (tdata->fileLength - tdata->seek < tdata->size) {
-        tdata->size = tdata->fileLength - tdata->seek;
-        *tdata->messageSize = (tdata->size / tdata->unit) / tdata->comm_sz;
-        tdata->remainder = (tdata->size / tdata->unit) - (*tdata->messageSize * tdata->comm_sz);
+    data *tdata = (data *) ptr;
+    if (tdata->my_rank == tdata->root) {
+
+        ifstream fileInput;
+        fileInput.open(filePath, ios::binary);
+        if (fileInput.is_open()) {
+            fileInput.seekg(tdata->seek);
+
+            //  Check if buffer is less then remainder of file
+            if (tdata->fileLength - tdata->seek < tdata->size) {
+                tdata->size = tdata->fileLength - tdata->seek;
+                *tdata->messageSize = (tdata->size / tdata->unit) / tdata->comm_sz;
+                tdata->remainder = (tdata->size / tdata->unit) - (*tdata->messageSize * tdata->comm_sz);
+            }
+            fileInput.read((char *) tdata->readBuffer, tdata->size);
+            tdata->seek = fileInput.tellg();
+
+            fileInput.close();
+        } else {
+            cout << "Can Not open file..." << endl;
+            tdata->keep_alive = false;
+        }
     }
-    fileInput->read((char *) tdata->readBuffer, tdata->size);
-    tdata->seek = fileInput->tellg();
+
+    // All processes call and check for error
+    MPI_Allreduce(&tdata->keep_alive, &tdata->alive, 1,MPI_C_BOOL, MPI_LAND, MPI_COMM_WORLD );
+    io_error_handling(tdata);
 
 }
 
 void read_local_file(void* ptr, int counter){
     data *tdata = (data *) ptr;
-
-
 
     ifstream fileInput;
     fileInput.open(tdata->local_file[counter], ios::binary);
@@ -238,7 +275,6 @@ void read_local_file(void* ptr, int counter){
         fileInput.seekg(0, ios::end);
         long fileLength = fileInput.tellg();
         *tdata->messageSize = fileLength / tdata->unit;
-//        *tdata->messageSize = fileInput.tellg() / tdata->unit;
         fileInput.seekg(0);
         fileInput.read((char *) tdata->local_buffer, fileLength);
         fileInput.close();
@@ -269,34 +305,7 @@ void writeFile(void* ptr, int counter) {
     io_error_handling(tdata);
 
 }
-// Input:  Takes a void pointer
-// Output: Reads call back to read file or init file
-void openFile(void(&f)(void *ptr, ifstream *fileInput), void *ptr) {
-    data *tdata = (data *) ptr;
-    if (tdata->my_rank == tdata->root) {
 
-        ifstream fileInput;
-        fileInput.open(tdata->filePath, ios::binary);
-        if (fileInput.is_open()) {
-
-            // Function CAll Back
-            f(tdata, &fileInput);
-            fileInput.close();
-        } else {
-            cout << "Can Not open file..." << endl;
-            tdata->keep_alive = false;
-        }
-    }
-
-    // All processes call and check for error
-    MPI_Allreduce(&tdata->keep_alive, &tdata->alive, 1,MPI_C_BOOL, MPI_LAND, MPI_COMM_WORLD );
-    if(!(tdata->alive)){
-        printf("Abort process called.  Thread %d shutting down!\n", tdata->my_rank);
-        MPI_Finalize();
-        exit(1);
-    }
-
-}
 
 // Input: 2 pointers to integer files and cluster root
 // Groups values together and broadcast
@@ -340,41 +349,6 @@ void find_min_max(void *ptr) {
     }
 }
 
-
-//  Input: void pointer
-//  Output: Calculate min and max or interval size through call backs.
-void loop_read_send(void(&f)(void *ptr), void *ptr) {
-    data *tdata = (data *) ptr;
-    int last = tdata->num_iterations - 1;
-
-    // Cycle through and send data
-    for (int i = 0; i < tdata->num_iterations; i++) {
-        // The last cycle maybe shorter.  Resize message
-        if (i == last)
-            tdata->messageSize = &tdata->minMessage;
-
-
-
-
-        // Read in data and Send Data
-        openFile(readFile, tdata);
-        MPI_Scatter(tdata->readBuffer, *tdata->messageSize, MPI_INT, tdata->local_buffer, *tdata->messageSize, MPI_INT, tdata->root, MPI_COMM_WORLD);
-
-        // Root gets any data not evenly split
-        if (tdata->remainder > 0 && tdata->my_rank == tdata->root) {
-            std::copy(tdata->readBuffer + ((tdata->size / tdata->unit) - tdata->remainder), tdata->readBuffer + (tdata->size / tdata->unit), tdata->local_buffer + *tdata->messageSize);
-            tdata->messageSize += tdata->remainder;
-
-            cout << "Remainder: " << tdata->remainder << endl;
-        }
-        writeFile(tdata, i);
-
-        // Calculate: min, max or number of partitions
-        f(tdata);
-
-    }
-
-}
 
 int main(int argc, char *argv[]) {
     //////// Start Clock //////////////
@@ -437,42 +411,49 @@ int main(int argc, char *argv[]) {
 
 
     //////// OPEN FILE //////////////
-    openFile(get_file_size_and_init, &tdata);
+    io_init(&tdata);
 
     //////// Send INIT MESG, Then Send all data and Reduce //////////////
     build_mpi_data_type(&tdata.num_iterations, &tdata.minMessage, tdata.root);
-    tdata.local_file = new string[tdata.num_iterations];
-//    tdata.local_filesize = new int[tdata.num_iterations];
+    tdata.local_file = create_file_structure(tdata.num_iterations, tdata.my_rank);
 
-    for(int i=0; i< tdata.num_iterations; i++){
-        tdata.local_file[i] = "/tmp/mcglincy_mpi_" + to_string(tdata.my_rank) + "_" + to_string(i) + ".binary";
+    // Cycle through and send data
+    int last = tdata.num_iterations - 1;
+    for (int i = 0; i < tdata.num_iterations; i++) {
+        if (i == last)        // The last cycle maybe shorter.  Resize message
+            tdata.messageSize = &tdata.minMessage;
+
+
+        // Read in data and Send Data
+        read_master_file(&tdata, tdata.filePath);
+
+        MPI_Scatter(tdata.readBuffer, *tdata.messageSize, MPI_INT, tdata.local_buffer, *tdata.messageSize, MPI_INT, tdata.root, MPI_COMM_WORLD);
+
+        // Root gets any data not evenly split
+        if (tdata.remainder > 0 && tdata.my_rank == tdata.root) {
+            std::copy(tdata.readBuffer + ((tdata.size / tdata.unit) - tdata.remainder), tdata.readBuffer + (tdata.size / tdata.unit), tdata.local_buffer + *tdata.messageSize);
+            tdata.messageSize += tdata.remainder;
+        }
+        writeFile(&tdata, i);
+        find_min_max(&tdata);
     }
-    loop_read_send(find_min_max, &tdata);
     MPI_Allreduce(&tdata.local_min, &tdata.min, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
     MPI_Allreduce(&tdata.local_max, &tdata.max, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
 
-    //////// Rest Values and Send Min and Max //////////////
-    tdata.messageSize = &tdata.maxMessage;
-//    tdata.seek = 0;
-//    tdata.remainder = 0;
-//    tdata.size = tdata.bufferSize;
-
-    //////// FIND Buckets //////////////
+    //////// FIND Buckets  & re-setvariables//////////////
     int range = abs(tdata.max - tdata.min);
     tdata.bucketSize = range / tdata.intervalSize;
     tdata.bucketSize++;
 
+
     //////// Send All Data and Reduce //////////////
-//    loop_read_send(calculate_intervals, &tdata);
     for(int j = 0; j< tdata.num_iterations; j++){
         read_local_file(&tdata, j);
         calculate_intervals(&tdata);
-
     }
 
     MPI_Reduce(tdata.local_data, tdata.data, tdata.intervalSize, MPI_INT, MPI_SUM, tdata.root, MPI_COMM_WORLD);
 
-//    MPI_Finalize();
 
     ////////  END CLOCK //////////////
     //////// GET TIME //////////////
@@ -484,9 +465,5 @@ int main(int argc, char *argv[]) {
         cout << "AVG Time: " << total_time << " Milli Seconds" << endl;
     }
     shutdown_threads(&tdata);
-//    delete[] tdata.local_buffer;
-//    delete[] tdata.local_data;
-//    delete[] tdata.readBuffer;
-//    delete[] tdata.data;
     return 0;
 }
