@@ -42,6 +42,7 @@
  * 5: The cluser cycles through the data.
  * The interval is calculated and reduced.
  * */
+#include <sstream>
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
@@ -61,15 +62,14 @@ typedef struct {
     int comm_sz;  // Number of process
     int my_rank;
 
-
     //////// MPI  Variables //////////////
-    const int root = 0;
+    int root;
     string* local_file;
-    int maxMessage = 100;
-    int *messageSize = NULL;
+    int maxMessage;
+    int *messageSize;
     int minMessage;
-    int *local_buffer = NULL;
-    int *local_data = NULL;
+    int *local_buffer;
+    int *local_data;
     int local_min;
     int local_max;
     int num_iterations;
@@ -87,21 +87,22 @@ typedef struct {
     int fileLength;
     int min;
     int max;
-    int *readBuffer = NULL;
-    int *data = NULL;
+    int *readBuffer;
+    int *data;
     int seek;
     int remainder;
 
 } data;
 
 
-void get_rank_thread_count(int *my_rank, int *thread_count) {
+void get_rank_thread_count(int *ts_rank, int *ts_count) {
+
 #ifdef _OPENMP
-    *my_rank = omp_get_thread_num();
-    *thread_count = omp_get_num_threads();
+    *ts_rank = omp_get_thread_num();
+    *ts_count = omp_get_num_threads();
 #else
-    *my_rank = 1;
-    *thread_count = 0;
+    *ts_rank= 0;
+    *ts_count = 1;
 #endif
 }
 
@@ -184,10 +185,19 @@ void init_array(int *a, int arr_size) {
         a[i] = 0;
 }
 
+template <typename T>
+std::string NumberToString ( T Number )
+{
+    // From: https://stackoverflow.com/questions/5590381/easiest-way-to-convert-int-to-string-in-c
+    std::ostringstream ss;
+    ss << Number;
+    return ss.str();
+}
+
 string* create_file_structure(int num_files, int rank){
     string* ptr = new string[num_files];
     for(int i=0; i< num_files; i++){
-        ptr[i] = "/tmp/mcglincy_mpi_" + to_string(rank) + "_" + to_string(i) + ".binary";
+        ptr[i] = "/tmp/mcglincy_mpi_" + NumberToString(rank) + "_" + NumberToString(i) + ".binary";
     }
     return ptr;
 }
@@ -197,8 +207,6 @@ string* create_file_structure(int num_files, int rank){
 // Output:  Calculates filelength and min message
 void io_init(void *ptr) {
     data *tdata = (data *) ptr;
-
-
     if (tdata->my_rank == tdata->root) {
 
         ifstream fileInput;
@@ -224,9 +232,6 @@ void io_init(void *ptr) {
             tdata->keep_alive = false;
         }
     }
-
-    // All processes call and check for error
-    MPI_Allreduce(&tdata->keep_alive, &tdata->alive, 1,MPI_C_BOOL, MPI_LAND, MPI_COMM_WORLD );
     io_error_handling(tdata);
 }
 
@@ -257,9 +262,6 @@ void read_master_file(void *ptr, string filePath) {
             tdata->keep_alive = false;
         }
     }
-
-    // All processes call and check for error
-    MPI_Allreduce(&tdata->keep_alive, &tdata->alive, 1,MPI_C_BOOL, MPI_LAND, MPI_COMM_WORLD );
     io_error_handling(tdata);
 
 }
@@ -301,7 +303,6 @@ void writeFile(void* ptr, int counter) {
         printf("Thread %d: Can Not write file...", tdata->my_rank);
         tdata->keep_alive = false;
     }
-    // All processes call and check for error
     io_error_handling(tdata);
 
 }
@@ -330,23 +331,78 @@ void build_mpi_data_type(int *data_1, int *data_2, int root) {
 
 //  Input: void pointer
 //  Output: increments the interval array
-void calculate_intervals(void *ptr) {
+void calculate_intervals(void *ptr, int numThreads) {
     data *tdata = (data *) ptr;
-    for (int i = 0; i < *tdata->messageSize; i++) {
-        tdata->local_data[(tdata->local_buffer[i] - tdata->min) / tdata->bucketSize]++;
+
+
+    int j;
+# pragma omp parallel num_threads(numThreads) default(none) private(j)  shared(tdata)
+    {
+        // Process Data
+        int ts_rank;
+        int ts_count;
+        vector<int> ts_data(tdata->intervalSize, 0);
+        get_rank_thread_count(&ts_rank, &ts_count);
+
+# pragma omp for schedule(static, ( *tdata->messageSize ) / ts_count )
+        for (j = 0; j < *tdata->messageSize; j++) {
+            ts_data[  (tdata->local_buffer[j] - tdata->min) / tdata->bucketSize]++;
+        }
+
+        for (j = 0; j < tdata->intervalSize; j++) {
+# pragma omp atomic
+            tdata->local_data[j] += ts_data[j];
+        }
+
     }
+
+
+//    data *tdata = (data *) ptr;
+//    for (int i = 0; i < *tdata->messageSize; i++) {
+//        tdata->local_data[(tdata->local_buffer[i] - tdata->min) / tdata->bucketSize]++;
+//    }
 }
 
 //  Input: void pointer
 //  Output: finds local min and max
-void find_min_max(void *ptr) {
+void find_min_max(void *ptr, int numThreads) {
     data *tdata = (data *) ptr;
-    for (int i = 0; i < *tdata->messageSize; i++) {
-        if (tdata->local_min > tdata->local_buffer[i])
-            tdata->local_min = tdata->local_buffer[i];
-        if (tdata->local_max < tdata->local_buffer[i])
-            tdata->local_max = tdata->local_buffer[i];
+
+    // ts_ denotes Thread Safe
+    int j;
+# pragma omp parallel num_threads(numThreads) default(none) private(j) shared(tdata)
+    {
+        int ts_rank;
+        int ts_count;
+        int ts_min = numeric_limits<int>::max();
+        int ts_max = numeric_limits<int>::min();
+        get_rank_thread_count(&ts_rank, &ts_count);
+
+// Find max and min
+# pragma omp for  schedule(static, *tdata->messageSize / ts_count )
+        for (j = 0; j < *tdata->messageSize; ++j) {
+            if (ts_min > tdata->local_buffer[j])
+                ts_min = tdata->local_buffer[j];
+            if (ts_max < tdata->local_buffer[j])
+                ts_max = tdata->local_buffer[j];
+        }
+        // One Critical section is faster then two named
+# pragma omp critical
+        {
+            if (tdata->local_min > ts_min)
+                tdata->local_min = ts_min;
+
+            if (tdata->local_max < ts_max)
+                tdata->local_max = ts_max;
+        }
     }
+
+//    for (int i = 0; i < *tdata->messageSize; i++) {
+//        if (tdata->local_min > tdata->local_buffer[i])
+//            tdata->local_min = tdata->local_buffer[i];
+//        if (tdata->local_max < tdata->local_buffer[i])
+//            tdata->local_max = tdata->local_buffer[i];
+//    }
 }
 
 
@@ -360,17 +416,31 @@ int main(int argc, char *argv[]) {
 
     //////// Data Struct INIT  //////////////
     data tdata;
+    tdata.messageSize = NULL;
+    tdata.local_buffer = NULL;
+    tdata.local_data = NULL;
+    tdata.readBuffer = NULL;
+    tdata.data = NULL;
+    tdata.local_file= NULL;
 
     //////// USER INPUT//////////////
-    if (argc != 3) {
+    if (argc != 4) {
         cout << "Error Error" << endl;
         cout << "Please provide: binary data file and interval size" << endl;
         exit(1);
     }
-    assert(argc == 3);
-    tdata.filePath = argv[1];
-    tdata.intervalSize = check_user_number(argv[2]);
-    assert(tdata.intervalSize > 0);
+//    assert(argc == 3);
+//    tdata.filePath = argv[1];
+//    tdata.intervalSize = check_user_number(argv[2]);
+//    assert(tdata.intervalSize > 0);
+    assert(argc == 4);
+    tdata.filePath = argv[1]; //Filename
+
+    tdata.intervalSize =  check_user_number(argv[2]);  // Interval Size
+    assert(tdata.intervalSize > 0 );
+
+    int numThreads =  check_user_number(argv[3]);  // NumThreads
+    assert(numThreads > 0 );
 
 
     //////// MPI  INIT //////////////
@@ -378,8 +448,14 @@ int main(int argc, char *argv[]) {
     MPI_Comm_size(MPI_COMM_WORLD, &tdata.comm_sz);
     MPI_Comm_rank(MPI_COMM_WORLD, &tdata.my_rank);
 
+//    //////// OMP  INIT //////////////
+//    tdata.ts_rank = 0;
+//    tdata.ts_count = 1;
+
 
     //////// MPI  Variables //////////////
+    tdata.root = 0;
+    tdata.maxMessage = 10000;
     tdata.messageSize = &tdata.maxMessage;
     tdata.minMessage = 0;
     tdata.local_buffer = new int[tdata.maxMessage + tdata.comm_sz];
@@ -435,7 +511,7 @@ int main(int argc, char *argv[]) {
             tdata.messageSize += tdata.remainder;
         }
         writeFile(&tdata, i);
-        find_min_max(&tdata);
+        find_min_max(&tdata,  numThreads);
     }
     MPI_Allreduce(&tdata.local_min, &tdata.min, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
     MPI_Allreduce(&tdata.local_max, &tdata.max, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
@@ -449,7 +525,7 @@ int main(int argc, char *argv[]) {
     //////// Send All Data and Reduce //////////////
     for(int j = 0; j< tdata.num_iterations; j++){
         read_local_file(&tdata, j);
-        calculate_intervals(&tdata);
+        calculate_intervals(&tdata, numThreads);
     }
 
     MPI_Reduce(tdata.local_data, tdata.data, tdata.intervalSize, MPI_INT, MPI_SUM, tdata.root, MPI_COMM_WORLD);

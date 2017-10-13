@@ -7,6 +7,8 @@
 #IncludeRegexTransform: 
 
 /home/sean/Desktop/school/parralel-systems/parallel-system-assignment-04-mpi-omp/main.cpp
+sstream
+-
 cstdlib
 -
 iostream
