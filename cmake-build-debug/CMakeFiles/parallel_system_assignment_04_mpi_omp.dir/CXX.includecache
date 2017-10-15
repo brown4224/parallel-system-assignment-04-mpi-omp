@@ -7,6 +7,10 @@
 #IncludeRegexTransform: 
 
 /home/sean/Desktop/school/parralel-systems/parallel-system-assignment-04-mpi-omp/main.cpp
+dirent.h
+-
+errno.h
+-
 sstream
 -
 cstdlib
@@ -26,5 +30,7 @@ assert.h
 mpi.h
 -
 omp.h
+-
+sys/stat.h
 -
 

@@ -42,6 +42,10 @@
  * 5: The cluser cycles through the data.
  * The interval is calculated and reduced.
  * */
+#include <dirent.h>
+#include <errno.h>
+
+
 #include <sstream>
 #include <cstdlib>
 #include <iostream>
@@ -53,6 +57,8 @@
 #include <mpi.h>
 #ifdef _OPENMP
 #include <omp.h>
+#include <sys/stat.h>
+
 #endif
 using namespace std;
 using namespace chrono;
@@ -64,6 +70,7 @@ typedef struct {
 
     //////// MPI  Variables //////////////
     int root;
+    string root_dir;  // ONLY USE TMP FILE
     string* local_file;
     int maxMessage;
     int *messageSize;
@@ -118,6 +125,7 @@ void delete_file(void* ptr, string filepath){
 
     if(std::remove(filepath.c_str())  != 0){
         printf("Thread %d: Can Not delete file...\n", tdata->my_rank);
+        cout << "File: " << filepath << endl;
         tdata->keep_alive = false;
     }
 }
@@ -194,12 +202,42 @@ std::string NumberToString ( T Number )
     return ss.str();
 }
 
-string* create_file_structure(int num_files, int rank){
-    string* ptr = new string[num_files];
-    for(int i=0; i< num_files; i++){
-        ptr[i] = "/tmp/mcglincy_mpi_" + NumberToString(rank) + "_" + NumberToString(i) + ".binary";
+string* create_file_structure(void* ptr, int num_files, int rank, string root_dir){
+    assert(root_dir.substr(0,5) == "/tmp/");  // ONLY USE TMP FILE
+    data *tdata = (data *) ptr;
+
+    char isFile = 0x8;
+    struct dirent *DirEntry;
+    const char* path = root_dir.c_str();
+    DIR* dir = opendir(path);
+    if(dir){
+
+        while((DirEntry = readdir(dir))){
+            if(DirEntry->d_type == isFile){
+                //cout << DirEntry->d_name << endl;
+                delete_file(tdata, root_dir + DirEntry->d_name );
+            }
+
+        }
+        closedir(dir);
+    } else if(ENOENT == errno){
+        // Create folder:  Permissions 777
+        mkdir(root_dir.c_str(),  S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IWGRP | S_IXGRP | S_IROTH | S_IWOTH | S_IXOTH);
+//        cout << "No files found" << endl;
+        // make dir here
+    } else{
+        cout << "Can Not create file structure..." << endl;
+        tdata->keep_alive = false;
+        io_error_handling(tdata);
+
     }
-    return ptr;
+    io_error_handling(tdata);
+
+    string* file_paths = new string[num_files];
+    for(int i=0; i< num_files; i++){
+        file_paths[i] = root_dir + "/mcglincy_mpi_" + NumberToString(rank) + "_" + NumberToString(i) + ".binary";
+    }
+    return file_paths;
 }
 
 
@@ -260,9 +298,10 @@ void read_master_file(void *ptr, string filePath) {
         } else {
             cout << "Can Not open file..." << endl;
             tdata->keep_alive = false;
+            io_error_handling(tdata);
         }
     }
-    io_error_handling(tdata);
+//    io_error_handling(tdata);
 
 }
 
@@ -283,9 +322,10 @@ void read_local_file(void* ptr, int counter){
     } else {
         cout << "Can Not open file..." << endl;
         tdata->keep_alive = false;
+        io_error_handling(tdata);
     }
 
-    io_error_handling(tdata);
+//    io_error_handling(tdata);
 }
 void writeFile(void* ptr, int counter) {
     data *tdata = (data *) ptr;
@@ -302,8 +342,9 @@ void writeFile(void* ptr, int counter) {
     {
         printf("Thread %d: Can Not write file...", tdata->my_rank);
         tdata->keep_alive = false;
+        io_error_handling(tdata);
     }
-    io_error_handling(tdata);
+//    io_error_handling(tdata);
 
 }
 
@@ -455,6 +496,7 @@ int main(int argc, char *argv[]) {
 
     //////// MPI  Variables //////////////
     tdata.root = 0;
+    tdata.root_dir = "/tmp/mcglincy_mpi/";  // ONLY USE TMP FILE
     tdata.maxMessage = 10000;
     tdata.messageSize = &tdata.maxMessage;
     tdata.minMessage = 0;
@@ -489,9 +531,10 @@ int main(int argc, char *argv[]) {
     //////// OPEN FILE //////////////
     io_init(&tdata);
 
+
     //////// Send INIT MESG, Then Send all data and Reduce //////////////
     build_mpi_data_type(&tdata.num_iterations, &tdata.minMessage, tdata.root);
-    tdata.local_file = create_file_structure(tdata.num_iterations, tdata.my_rank);
+    tdata.local_file = create_file_structure(&tdata, tdata.num_iterations, tdata.my_rank, tdata.root_dir);
 
     // Cycle through and send data
     int last = tdata.num_iterations - 1;
@@ -513,6 +556,7 @@ int main(int argc, char *argv[]) {
         writeFile(&tdata, i);
         find_min_max(&tdata,  numThreads);
     }
+    io_error_handling(&tdata);
     MPI_Allreduce(&tdata.local_min, &tdata.min, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
     MPI_Allreduce(&tdata.local_max, &tdata.max, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
 
@@ -527,7 +571,7 @@ int main(int argc, char *argv[]) {
         read_local_file(&tdata, j);
         calculate_intervals(&tdata, numThreads);
     }
-
+    io_error_handling(&tdata);
     MPI_Reduce(tdata.local_data, tdata.data, tdata.intervalSize, MPI_INT, MPI_SUM, tdata.root, MPI_COMM_WORLD);
 
 
