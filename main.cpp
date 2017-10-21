@@ -70,7 +70,7 @@ typedef struct {
 
     //////// MPI  Variables //////////////
     int root;
-    string root_dir;  // ONLY USE TMP FILE
+//    string root_dir;  // ONLY USE TMP FILE
     string* local_file;
     int maxMessage;
     int *messageSize;
@@ -101,7 +101,9 @@ typedef struct {
 
 } data;
 
-
+// IN: takes pointer to the rank and thread count
+// OUt:  produces the number of threads being used and the current threads rank
+//       If OPENMP is not installed.  One thread is used
 void get_rank_thread_count(int *ts_rank, int *ts_count) {
 
 #ifdef _OPENMP
@@ -132,7 +134,7 @@ void delete_file(void* ptr, string filepath){
 void shutdown_threads(void *ptr){
     data *tdata = (data *) ptr;
     for(int i= 0; i < tdata->num_iterations; i++)
-        delete_file(&tdata,tdata->local_file[i]);
+        delete_file(&tdata, tdata->local_file[i]);
     delete[] tdata->local_buffer;
     delete[] tdata->local_data;
     delete[] tdata->readBuffer;
@@ -202,29 +204,31 @@ std::string NumberToString ( T Number )
     return ss.str();
 }
 
-string* create_file_structure(void* ptr, int num_files, int rank, string root_dir){
-    assert(root_dir.substr(0,5) == "/tmp/");  // ONLY USE TMP FILE
+string* create_file_structure(void* ptr, int num_files, int rank){
+//    assert(root_dir.substr(0,5) == "/tmp/");  // ONLY USE TMP FILE
     data *tdata = (data *) ptr;
+
+    string root_dir = "/tmp/mcglincy_mpi/";  // ONLY USE TMP FILE
+    string root_file_name = "mcglincy_mpi_";
 
     char isFile = 0x8;
     struct dirent *DirEntry;
     const char* path = root_dir.c_str();
     DIR* dir = opendir(path);
     if(dir){
-
+        // If directory exist, clear old files
         while((DirEntry = readdir(dir))){
             if(DirEntry->d_type == isFile){
-                //cout << DirEntry->d_name << endl;
-                delete_file(tdata, root_dir + DirEntry->d_name );
+                string file = DirEntry->d_name;
+                if(file.substr(0, root_file_name.length()).compare(root_file_name))  // compare, only delete my files
+                    delete_file(tdata, root_dir + DirEntry->d_name );
             }
-
         }
         closedir(dir);
     } else if(ENOENT == errno){
         // Create folder:  Permissions 777
-        mkdir(root_dir.c_str(),  S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IWGRP | S_IXGRP | S_IROTH | S_IWOTH | S_IXOTH);
-//        cout << "No files found" << endl;
-        // make dir here
+//        mkdir(root_dir.c_str(),  S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IWGRP | S_IXGRP | S_IROTH | S_IWOTH | S_IXOTH);
+        mkdir(root_dir.c_str(),  0777);
     } else{
         cout << "Can Not create file structure..." << endl;
         tdata->keep_alive = false;
@@ -235,7 +239,7 @@ string* create_file_structure(void* ptr, int num_files, int rank, string root_di
 
     string* file_paths = new string[num_files];
     for(int i=0; i< num_files; i++){
-        file_paths[i] = root_dir + "/mcglincy_mpi_" + NumberToString(rank) + "_" + NumberToString(i) + ".binary";
+        file_paths[i] = root_dir + root_file_name + NumberToString(rank) + "_" + NumberToString(i) + ".binary";
     }
     return file_paths;
 }
@@ -251,7 +255,6 @@ void io_init(void *ptr) {
         fileInput.open(tdata->filePath, ios::binary);
         if (fileInput.is_open()) {
 
-            // Function CAll Back
             fileInput.seekg(0, ios::end);
             tdata->fileLength = fileInput.tellg();
             tdata->num_iterations = (int) ceil((double) tdata->fileLength / tdata->bufferSize);
@@ -259,8 +262,7 @@ void io_init(void *ptr) {
             if (tdata->fileLength < tdata->bufferSize) {
                 tdata->minMessage = (tdata->fileLength / tdata->unit) / tdata->comm_sz;
             } else {
-                tdata->minMessage = ((tdata->fileLength - (tdata->num_iterations - 1) * tdata->bufferSize)) /
-                                    (tdata->unit * tdata->comm_sz);
+                tdata->minMessage = ((tdata->fileLength - (tdata->num_iterations - 1) * tdata->bufferSize)) / (tdata->unit * tdata->comm_sz);
                 if (tdata->minMessage <= 0)
                     tdata->minMessage = tdata->maxMessage;
             }
@@ -312,7 +314,6 @@ void read_local_file(void* ptr, int counter){
     fileInput.open(tdata->local_file[counter], ios::binary);
     if (fileInput.is_open()) {
 
-        // Function CAll Back
         fileInput.seekg(0, ios::end);
         long fileLength = fileInput.tellg();
         *tdata->messageSize = fileLength / tdata->unit;
@@ -329,13 +330,18 @@ void read_local_file(void* ptr, int counter){
 }
 void writeFile(void* ptr, int counter) {
     data *tdata = (data *) ptr;
-    assert(tdata->local_file[counter] != "");
-    assert(tdata->local_buffer != NULL);
+    if(tdata->local_file[counter] == "" || tdata->local_buffer == NULL){
+        printf("Thread %d: Filename not initialized\n", tdata->my_rank);
+        tdata->keep_alive = false;
+        io_error_handling(tdata);
+    }
 
     try {
         ofstream fileOut (tdata->local_file[counter], ios::binary);
         fileOut.write((char*) tdata->local_buffer, *tdata->messageSize * tdata->unit);
         fileOut.close();
+//        chmod(  tdata->local_file[counter].c_str(), S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IWGRP | S_IXGRP | S_IROTH | S_IWOTH | S_IXOTH);
+        chmod(  tdata->local_file[counter].c_str(), 0777);
 
     }
     catch(std::ofstream::failure &writeErr)
@@ -396,12 +402,6 @@ void calculate_intervals(void *ptr, int numThreads) {
         }
 
     }
-
-
-//    data *tdata = (data *) ptr;
-//    for (int i = 0; i < *tdata->messageSize; i++) {
-//        tdata->local_data[(tdata->local_buffer[i] - tdata->min) / tdata->bucketSize]++;
-//    }
 }
 
 //  Input: void pointer
@@ -437,13 +437,6 @@ void find_min_max(void *ptr, int numThreads) {
                 tdata->local_max = ts_max;
         }
     }
-
-//    for (int i = 0; i < *tdata->messageSize; i++) {
-//        if (tdata->local_min > tdata->local_buffer[i])
-//            tdata->local_min = tdata->local_buffer[i];
-//        if (tdata->local_max < tdata->local_buffer[i])
-//            tdata->local_max = tdata->local_buffer[i];
-//    }
 }
 
 
@@ -474,7 +467,7 @@ int main(int argc, char *argv[]) {
 //    tdata.filePath = argv[1];
 //    tdata.intervalSize = check_user_number(argv[2]);
 //    assert(tdata.intervalSize > 0);
-    assert(argc == 4);
+//    assert(argc == 4);
     tdata.filePath = argv[1]; //Filename
 
     tdata.intervalSize =  check_user_number(argv[2]);  // Interval Size
@@ -496,7 +489,7 @@ int main(int argc, char *argv[]) {
 
     //////// MPI  Variables //////////////
     tdata.root = 0;
-    tdata.root_dir = "/tmp/mcglincy_mpi/";  // ONLY USE TMP FILE
+//    tdata.root_dir = "/tmp/mcglincy_mpi/";  // ONLY USE TMP FILE
     tdata.maxMessage = 10000;
     tdata.messageSize = &tdata.maxMessage;
     tdata.minMessage = 0;
@@ -528,13 +521,15 @@ int main(int argc, char *argv[]) {
     init_array(tdata.data, tdata.intervalSize);
 
 
+
     //////// OPEN FILE //////////////
+    omp_set_dynamic(0);  // Turn off dynamic threads
     io_init(&tdata);
 
 
     //////// Send INIT MESG, Then Send all data and Reduce //////////////
     build_mpi_data_type(&tdata.num_iterations, &tdata.minMessage, tdata.root);
-    tdata.local_file = create_file_structure(&tdata, tdata.num_iterations, tdata.my_rank, tdata.root_dir);
+    tdata.local_file = create_file_structure(&tdata, tdata.num_iterations, tdata.my_rank); // return an array of filenames
 
     // Cycle through and send data
     int last = tdata.num_iterations - 1;
@@ -556,7 +551,8 @@ int main(int argc, char *argv[]) {
         writeFile(&tdata, i);
         find_min_max(&tdata,  numThreads);
     }
-    io_error_handling(&tdata);
+
+    io_error_handling(&tdata);  // All check for errors
     MPI_Allreduce(&tdata.local_min, &tdata.min, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
     MPI_Allreduce(&tdata.local_max, &tdata.max, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
 
@@ -571,15 +567,15 @@ int main(int argc, char *argv[]) {
         read_local_file(&tdata, j);
         calculate_intervals(&tdata, numThreads);
     }
-    io_error_handling(&tdata);
+
+    io_error_handling(&tdata); // All check for errors
     MPI_Reduce(tdata.local_data, tdata.data, tdata.intervalSize, MPI_INT, MPI_SUM, tdata.root, MPI_COMM_WORLD);
 
 
     ////////  END CLOCK //////////////
     //////// GET TIME //////////////
     if (tdata.my_rank == tdata.root) {
-        print(tdata.fileLength / tdata.unit, tdata.min, tdata.max, tdata.bucketSize, tdata.data, tdata.my_rank,
-              tdata.intervalSize);
+        print(tdata.fileLength / tdata.unit, tdata.min, tdata.max, tdata.bucketSize, tdata.data, tdata.my_rank, tdata.intervalSize);
         clock(clock_end, &time_samples);
         double total_time = calculate_time(clock_start, clock_end, &time_samples);
         cout << "AVG Time: " << total_time << " Milli Seconds" << endl;
