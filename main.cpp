@@ -14,13 +14,14 @@
  * To run file execute the binary file as ./filename
  * arg 1: is the filepath
  * arg 2: is the number of intervals
- * Example: mpiCC -g -Wall -o mpi_program main.cpp -std=c++0x
- *          mpiexec -n 5  mpi_program  ./random.binary  10
+ * arg 3: is the number of threads
+ * Example: mpiCC -g -Wall -fopenmp -o mpi_program main.cpp -std=c++0x
+ *          mpiexec -n 4  mpi_program  ./random.binary  10 4
  *
  *
  *
  * Description:
- * This program uses C++ and MPI libraries and must be compiled before execution.
+ * This program uses C++, OMP and MPI libraries and must be compiled before execution.
  * The file will constantly open and close the file during program execution.  It is assumed that
  * the file may be on a sans/ nsf server and too large for memory.  It is also assumed that the file may
  * not be left open indefantly on a cluster enviroment.
@@ -37,15 +38,27 @@
  * the root node to reduce transmition and complexity.
  * (Array size is default + number of processors)
  *
+ * UPDATE:  The cluster creates a distributed file structure for each cluster node.
+ * The filenames are hashed to prevent collisions.  Each node stores what was sent in a small file or (shard).
+ * These shards match the bit length that were sent and will fit into memory, rather then storing in one large folder.
+ * The cluster then runs min & max using omp's multi threading library.  'ts_' indecates thread safe while 'local' indicates
+ * a variable shared by the threads.
+ *
  * 4:  Values are reset
  *
  * 5: The cluser cycles through the data.
  * The interval is calculated and reduced.
+ * UPDATE:  The cluster now does not re-send data but reads the shard files.  The program then exicutes 'interval calculations'
+ * using omp's threading library.
+ *
+ * Error handling:  a custom error handing protocal was written to shut down the cluster if any IO errors were handled by
+ * any of the node.  I tried to reduce the 'mpi ALL_Reduce' as little as possible.  All cluster nodes need to call this after
+ * root makes an IO call incase an error ocured.  However, when all nodes are operating independently, this can be called
+ * after the end of the loop.  Calling at the end of the loop reduces the number of mpi transmitions because the io error function
+ * is written to block the cluster node that has errored out.
  * */
 #include <dirent.h>
 #include <errno.h>
-
-
 #include <sstream>
 #include <cstdlib>
 #include <iostream>
@@ -54,12 +67,12 @@
 #include <vector>
 #include <cmath>
 #include <assert.h>
+#include <sys/stat.h>
 #include <mpi.h>
 #ifdef _OPENMP
 #include <omp.h>
-#include <sys/stat.h>
-
 #endif
+
 using namespace std;
 using namespace chrono;
 
@@ -70,7 +83,6 @@ typedef struct {
 
     //////// MPI  Variables //////////////
     int root;
-//    string root_dir;  // ONLY USE TMP FILE
     string* local_file;
     int maxMessage;
     int *messageSize;
@@ -122,8 +134,17 @@ void clock(high_resolution_clock::time_point *array, int *time_samples) {
         array[i] = high_resolution_clock::now();
     }
 }
+// Input: Takes a pointer and full file path
+//  Deletes the file.  If it can't cluster node is marked for shutdown
 void delete_file(void* ptr, string filepath){
     data *tdata = (data *) ptr;
+
+    if(filepath == ""){
+        printf("Thread %d: Filename not initialized, can't delete file\n", tdata->my_rank);
+        cout << "File: " << filepath << endl;
+        tdata->keep_alive = false;
+        return;
+    }
 
     if(std::remove(filepath.c_str())  != 0){
         printf("Thread %d: Can Not delete file...\n", tdata->my_rank);
@@ -131,6 +152,9 @@ void delete_file(void* ptr, string filepath){
         tdata->keep_alive = false;
     }
 }
+
+// Input:  takes a void pointer to data structure
+//  Clears all files, then all arrays on the heap, then starts shutdown with mpi finalize
 void shutdown_threads(void *ptr){
     data *tdata = (data *) ptr;
     for(int i= 0; i < tdata->num_iterations; i++)
@@ -142,6 +166,8 @@ void shutdown_threads(void *ptr){
     delete[] tdata->local_file;
     MPI_Finalize();
 }
+// Input:  takes a void pointer
+// Checks to see if a any threads have had errors.  If error exist, shut down cluster and clear files and memory
 void io_error_handling(void *ptr){
     data *tdata = (data *) ptr;
     MPI_Allreduce(&tdata->keep_alive, &tdata->alive, 1,MPI_C_BOOL, MPI_LAND, MPI_COMM_WORLD );
@@ -195,6 +221,8 @@ void init_array(int *a, int arr_size) {
         a[i] = 0;
 }
 
+// Input:  takes a number
+// Returns the number as a string
 template <typename T>
 std::string NumberToString ( T Number )
 {
@@ -203,9 +231,16 @@ std::string NumberToString ( T Number )
     ss << Number;
     return ss.str();
 }
-
+/**
+ * Creates a folder in /tmp for our distributed data structure.  If something went wrong and files exist from
+ * last time, clear only our files.   Otherwise, create a folder and set permissions.  Use chmod 777 for dev.
+ *
+ * Creates an array of files paths that are hashed to each cluster node to prevent possible collisions if more
+ * then one node is using shared storage.  The array is used later by 'write' and 'read local' functions.
+ */
+// Input:  takes a pointer, number of files to create and node rank
+// Returns an array of file paths to be used locally during the program
 string* create_file_structure(void* ptr, int num_files, int rank){
-//    assert(root_dir.substr(0,5) == "/tmp/");  // ONLY USE TMP FILE
     data *tdata = (data *) ptr;
 
     string root_dir = "/tmp/mcglincy_mpi/";  // ONLY USE TMP FILE
@@ -303,10 +338,14 @@ void read_master_file(void *ptr, string filePath) {
             io_error_handling(tdata);
         }
     }
-//    io_error_handling(tdata);
+    io_error_handling(tdata);  // All check if root failed
 
 }
 
+// Input:  takes a pointer and the counter for file path that will be accessed.
+//  Gets the length of the file and reads the file into memory.  Because we are working with
+// many small files, we know that this will fit into memory.
+// io_error_handling moved to end of loop of main program
 void read_local_file(void* ptr, int counter){
     data *tdata = (data *) ptr;
 
@@ -328,6 +367,11 @@ void read_local_file(void* ptr, int counter){
 
 //    io_error_handling(tdata);
 }
+
+// Input:  Void pointer, Counter to position in file array.  What file to read in.
+// Writes the file that was sent via MPI to memory.  Uses a hashed filename.
+// Store many small file instead of one big file
+// Set file permisions to 777 for Dev
 void writeFile(void* ptr, int counter) {
     data *tdata = (data *) ptr;
     if(tdata->local_file[counter] == "" || tdata->local_buffer == NULL){
@@ -463,11 +507,7 @@ int main(int argc, char *argv[]) {
         cout << "Please provide: binary data file and interval size" << endl;
         exit(1);
     }
-//    assert(argc == 3);
-//    tdata.filePath = argv[1];
-//    tdata.intervalSize = check_user_number(argv[2]);
-//    assert(tdata.intervalSize > 0);
-//    assert(argc == 4);
+
     tdata.filePath = argv[1]; //Filename
 
     tdata.intervalSize =  check_user_number(argv[2]);  // Interval Size
@@ -482,14 +522,10 @@ int main(int argc, char *argv[]) {
     MPI_Comm_size(MPI_COMM_WORLD, &tdata.comm_sz);
     MPI_Comm_rank(MPI_COMM_WORLD, &tdata.my_rank);
 
-//    //////// OMP  INIT //////////////
-//    tdata.ts_rank = 0;
-//    tdata.ts_count = 1;
 
 
     //////// MPI  Variables //////////////
     tdata.root = 0;
-//    tdata.root_dir = "/tmp/mcglincy_mpi/";  // ONLY USE TMP FILE
     tdata.maxMessage = 10000;
     tdata.messageSize = &tdata.maxMessage;
     tdata.minMessage = 0;
@@ -520,8 +556,6 @@ int main(int argc, char *argv[]) {
     init_array(tdata.readBuffer, tdata.bufferSize);
     init_array(tdata.data, tdata.intervalSize);
 
-
-
     //////// OPEN FILE //////////////
     omp_set_dynamic(0);  // Turn off dynamic threads
     io_init(&tdata);
@@ -540,7 +574,6 @@ int main(int argc, char *argv[]) {
 
         // Read in data and Send Data
         read_master_file(&tdata, tdata.filePath);
-
         MPI_Scatter(tdata.readBuffer, *tdata.messageSize, MPI_INT, tdata.local_buffer, *tdata.messageSize, MPI_INT, tdata.root, MPI_COMM_WORLD);
 
         // Root gets any data not evenly split
@@ -549,7 +582,7 @@ int main(int argc, char *argv[]) {
             tdata.messageSize += tdata.remainder;
         }
         writeFile(&tdata, i);
-        find_min_max(&tdata,  numThreads);
+        find_min_max(&tdata, numThreads);
     }
 
     io_error_handling(&tdata);  // All check for errors
